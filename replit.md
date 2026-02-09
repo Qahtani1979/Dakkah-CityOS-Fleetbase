@@ -42,11 +42,34 @@ The codebase was designed for MySQL. Key adaptations made:
 - `console/fleetbase.config.json` - Console runtime configuration
 - `console/environments/.env.development` - Console development environment
 
+## Design Documentation
+- `docs/architecture.md` - System boundary, tenancy model, ownership matrix, security, observability
+- `docs/domain-model.md` - Core entities (DeliveryOrder, Provider, Agent, Vehicle, TrackingEvent, POD, SLA), NodeContext schema, status machines, API envelope
+- `docs/roadmap.md` - 14-phase implementation roadmap (Phase 0-13) with deliverables, acceptance criteria, dependencies, and timeline
+- `docs/integration-strategy.md` - Payload CMS, Medusa Commerce, ERPNext, Temporal workflows, CityBus events, outbox pattern
+- `docs/repo-layout.md` - Target monorepo structure, 16 CityOS packages, dependency graph, migration strategy from current to target layout
+
 ## Workflows
 - **API Server**: `cd api && php artisan serve --host=0.0.0.0 --port=8000`
 - **Console Frontend**: `cd console && npx ember serve --port 5000 --host 0.0.0.0 --proxy http://localhost:8000 --environment development`
 
-## Recent Changes (2026-02-07)
+## Recent Changes (2026-02-09)
+- Fixed cache driver: switched from `file` to `array` (Laravel 10 file driver doesn't support tagging required by Fleetbase's HasCacheableAttributes trait)
+- Disabled response cache (spatie/laravel-responsecache) which was trying to use Redis - set RESPONSE_CACHE_ENABLED=false and RESPONSE_CACHE_DRIVER=array
+- Created permissions and roles via `php artisan fleetbase:create-permissions` (required for account creation)
+- Removed Redis dependency from .env (no Redis server available in this environment)
+- Added `mysql` connection alias in `database.php` that redirects to PostgreSQL (Fleetbase models hardcode `$connection = 'mysql'`)
+- Fixed Utils::clearCacheByPattern() to gracefully handle missing Redis (wraps in try/catch)
+- Fixed getUserOrganizations query: replaced DISTINCT with whereIn to avoid PostgreSQL JSON equality operator error
+- Fixed fuel_reports.amount column type: changed from varchar to numeric for SUM aggregation
+- GitHub repository created: https://github.com/Qahtani1979/Dakkah-CityOS-Fleetbase
+
+## Known Limitations
+- SocketCluster (WebSocket) not available - real-time push notifications won't work (ERR_CONNECTION_REFUSED on port 38000 is expected)
+- No Redis server - using array cache driver instead (cache is in-memory, cleared on restart)
+- Response caching disabled due to no Redis
+
+## Previous Changes (2026-02-07)
 - Initial project import and configuration
 - All 252 database migrations completed successfully
 - PostgreSQL compatibility patches applied
