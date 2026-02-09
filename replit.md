@@ -11,19 +11,39 @@ Fleetbase is a modular logistics and supply chain operating system consisting of
 - Laravel PHP application
 - PostgreSQL database (adapted from original MySQL design)
 - PostGIS extension for spatial data
-- Key packages: fleetbase/core-api, fleetbase/fleetops-api, fleetbase/storefront-api
+- Key packages: fleetbase/core-api, fleetbase/fleetops-api, fleetbase/storefront-api, fleetbase/pallet-api, fleetbase/cityos-api
 
 ### Frontend (console/)
 - Ember.js application (v5.4.1)
 - Uses pnpm for package management
 - Proxies API calls to localhost:8000 via Ember CLI proxy
 - fleetbase.config.json configures API_HOST (empty = use proxy)
+- Extensions discovered: dev-engine, fleetops-engine, iam-engine, registry-bridge-engine, pallet-engine, storefront-engine
 
 ### Database
 - PostgreSQL with PostGIS extension
-- 252 migrations completed
-- Multiple database connections (storefront, sandbox, fleetops) all redirected to main pgsql connection via .env (STOREFRONT_DB_CONNECTION=pgsql, SANDBOX_DB_CONNECTION=pgsql)
-- UUID columns use char(36)/varchar(191) instead of native PostgreSQL uuid type
+- 274+ migrations completed (252 core + 14 pallet + 8 cityos)
+- Multiple database connections (storefront, sandbox, fleetops) all redirected to main pgsql connection via .env
+- UUID columns use char(36)/varchar(36) instead of native PostgreSQL uuid type
+
+### Custom Extensions (api/packages/)
+
+#### fleetbase/pallet-api (Warehouse Management)
+- Installed from fleetbase/pallet GitHub monorepo as local path package
+- 12 database tables: pallet_audits, pallet_batches, pallet_inventories, pallet_purchase_orders, pallet_sales_orders, pallet_stock_adjustment, pallet_stock_transactions, pallet_warehouse_aisles, pallet_warehouse_bins, pallet_warehouse_docks, pallet_warehouse_racks, pallet_warehouse_sections
+- Models: Audit, Batch, Inventory, Product, PurchaseOrder, SalesOrder, StockAdjustment, StockTransaction, Supplier, Warehouse, WarehouseAisle, WarehouseBin, WarehouseDock, WarehouseRack, WarehouseSection
+- Routes: pallet/int/v1/* (CRUD for all resources)
+- PostgreSQL fix: all `uuid()` calls in migrations replaced with `string('uuid', 36)` and existing native uuid columns ALTER'd to varchar(36)
+
+#### fleetbase/cityos-api (CityOS Multi-Hierarchy)
+- Custom extension for Dakkah CityOS platform
+- 8 database tables: cityos_countries, cityos_cities, cityos_sectors, cityos_categories, cityos_channels, cityos_surfaces, cityos_tenants, cityos_portals
+- Hierarchy: Country → City → Sector → Category(+subcategory) → Tenant → Channel → Surface → Portal
+- Models: Country, City, Sector, Category, Tenant, Channel, Surface, Portal
+- NodeContext support class for governance context resolution (from headers/cookies/path)
+- ResolveNodeContext middleware
+- Integration fields: medusa_tenant_id, payload_tenant_id, erpnext_company, medusa_sales_channel_id, medusa_store_id, payload_store_id
+- Routes: cityos/int/v1/* (CRUD for all hierarchy entities) + cityos/v1/hierarchy/tree|resolve (public)
 
 ## PostgreSQL Compatibility Notes
 The codebase was designed for MySQL. Key adaptations made:
@@ -34,11 +54,14 @@ The codebase was designed for MySQL. Key adaptations made:
 5. Cross-database `Expression()` references removed (PostgreSQL doesn't support database.table syntax)
 6. All uuid columns given unique constraints (required for foreign key references in PostgreSQL)
 7. Spatial index naming conflicts resolved
+8. Pallet extension migrations: `uuid()` replaced with `string('uuid', 36)` and existing columns ALTER'd
 
 ## Key Files
 - `api/.env` - Backend environment configuration
 - `api/config/database.php` - Database connection configuration
 - `api/app/Providers/PostgresCompatServiceProvider.php` - PostgreSQL compatibility layer
+- `api/packages/cityos/` - CityOS multi-hierarchy extension
+- `api/packages/pallet-api/` - Pallet WMS extension (local copy)
 - `console/fleetbase.config.json` - Console runtime configuration
 - `console/environments/.env.development` - Console development environment
 
@@ -49,29 +72,59 @@ The codebase was designed for MySQL. Key adaptations made:
 - `docs/integration-strategy.md` - Payload CMS, Medusa Commerce, ERPNext, Temporal workflows, CityBus events, outbox pattern
 - `docs/repo-layout.md` - Target monorepo structure, 16 CityOS packages, dependency graph, migration strategy from current to target layout
 
+## CityOS Multi-Hierarchy Model
+Aligns with Payload CMS orchestrator collections and Medusa Commerce custom modules:
+```
+Country (SA, AE)
+  └─ City/Theme (riyadh, jeddah)
+       └─ Sector (logistics, services, mobility)
+            └─ Category (delivery, field_service)
+                 └─ Subcategory (food, parcel, installation)
+                      └─ Tenant (linked to Fleetbase Company)
+                           └─ Channel (web, mobile, api, kiosk)
+                                └─ Surface (consumer-app, provider-portal)
+                                     └─ Portal (storefront, admin dashboard)
+```
+
+### NodeContext Fields
+| Field | Source | Description |
+|---|---|---|
+| country | Header/Path/Cookie | ISO 3166-1 alpha-2 code |
+| cityOrTheme | Header/Path/Cookie | City slug or theme |
+| sector | Header/Path/Cookie | Business sector |
+| category | Header/Path/Cookie | Primary category |
+| subcategory | Header/Path/Cookie | Sub-category |
+| tenant | Header/Path/Cookie | Tenant handle/uuid |
+| channel | Header/Path/Cookie | Request channel |
+| surface | Header/Path/Cookie | BFF surface |
+| persona | Header/Path/Cookie | Acting persona |
+| locale | Header/Path/Cookie | BCP 47 locale |
+| processingRegion | Header/Path/Cookie | Data processing region |
+| residencyClass | Header/Path/Cookie | sovereign/regional/global |
+
 ## Workflows
 - **API Server**: `cd api && php artisan serve --host=0.0.0.0 --port=8000`
 - **Console Frontend**: `cd console && npx ember serve --port 5000 --host 0.0.0.0 --proxy http://localhost:8000 --environment development`
 
 ## Recent Changes (2026-02-09)
-- Fixed cache driver: switched from `file` to `array` (Laravel 10 file driver doesn't support tagging required by Fleetbase's HasCacheableAttributes trait)
-- Disabled response cache (spatie/laravel-responsecache) which was trying to use Redis - set RESPONSE_CACHE_ENABLED=false and RESPONSE_CACHE_DRIVER=array
-- Created permissions and roles via `php artisan fleetbase:create-permissions` (required for account creation)
-- Removed Redis dependency from .env (no Redis server available in this environment)
-- Added `mysql` connection alias in `database.php` that redirects to PostgreSQL (Fleetbase models hardcode `$connection = 'mysql'`)
-- Fixed Utils::clearCacheByPattern() to gracefully handle missing Redis (wraps in try/catch)
-- Fixed getUserOrganizations query: replaced DISTINCT with whereIn to avoid PostgreSQL JSON equality operator error
-- Fixed fuel_reports.amount column type: changed from varchar to numeric for SUM aggregation
-- GitHub repository created: https://github.com/Qahtani1979/Dakkah-CityOS-Fleetbase
+- Installed Pallet WMS extension (fleetbase/pallet-api) with 12 warehouse/inventory tables
+- Installed @fleetbase/pallet-engine frontend (discovered by Ember build system)
+- Created fleetbase/cityos-api custom extension with 8 hierarchy tables
+- Implemented NodeContext middleware and tenant-scoping support
+- Built full CRUD REST API for CityOS hierarchy entities
+- All code pushed to GitHub: https://github.com/Qahtani1979/Dakkah-CityOS-Fleetbase
+
+## Previous Changes (2026-02-09)
+- Fixed cache driver: switched from `file` to `array`
+- Disabled response cache (spatie/laravel-responsecache)
+- Created permissions and roles
+- Removed Redis dependency
+- Added `mysql` connection alias in `database.php`
+- Fixed various PostgreSQL compatibility issues
+- Created comprehensive design documentation
 
 ## Known Limitations
-- SocketCluster (WebSocket) not available - real-time push notifications won't work (ERR_CONNECTION_REFUSED on port 38000 is expected)
-- No Redis server - using array cache driver instead (cache is in-memory, cleared on restart)
+- SocketCluster (WebSocket) not available - real-time push notifications won't work
+- No Redis server - using array cache driver instead
 - Response caching disabled due to no Redis
-
-## Previous Changes (2026-02-07)
-- Initial project import and configuration
-- All 252 database migrations completed successfully
-- PostgreSQL compatibility patches applied
-- Both API and Console servers running
-- CORS configured for Replit domain
+- Pallet extension uuid() macro doesn't apply during `artisan migrate` - migrations patched to use string('uuid', 36) directly

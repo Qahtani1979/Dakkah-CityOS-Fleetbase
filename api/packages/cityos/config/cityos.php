@@ -15,4 +15,19 @@ return [
         'default_processing_region' => 'me-central-1',
         'default_residency_class' => 'sovereign',
     ],
+    'temporal' => [
+        'address' => env('TEMPORAL_ADDRESS', ''),
+        'namespace' => env('TEMPORAL_NAMESPACE', ''),
+        'api_key' => env('TEMPORAL_API_KEY', ''),
+        'task_queue' => env('TEMPORAL_TASK_QUEUE', 'cityos-default'),
+    ],
+    'cms' => [
+        'base_url' => env('CITYOS_CMS_BASE_URL', ''),
+        'api_key' => env('CITYOS_CMS_API_KEY', ''),
+    ],
+    'erpnext' => [
+        'base_url' => env('ERPNEXT_BASE_URL', ''),
+        'api_key' => env('ERPNEXT_API_KEY', ''),
+        'api_secret' => env('ERPNEXT_API_SECRET', ''),
+    ],
 ];
