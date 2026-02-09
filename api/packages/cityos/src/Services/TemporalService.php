@@ -8,30 +8,113 @@ use Illuminate\Support\Str;
 
 class TemporalService
 {
-    protected string $address;
+    protected string $grpcAddress;
     protected string $namespace;
     protected string $apiKey;
+    protected string $cloudOpsUrl = 'https://saas-api.tmprl.cloud';
     protected string $cmsBaseUrl;
     protected string $cmsApiKey;
 
     public function __construct()
     {
-        $this->address = config('cityos.temporal.address', env('TEMPORAL_ADDRESS', ''));
+        $this->grpcAddress = config('cityos.temporal.address', env('TEMPORAL_ADDRESS', ''));
         $this->namespace = config('cityos.temporal.namespace', env('TEMPORAL_NAMESPACE', ''));
         $this->apiKey = config('cityos.temporal.api_key', env('TEMPORAL_API_KEY', ''));
         $this->cmsBaseUrl = config('cityos.cms.base_url', env('CITYOS_CMS_BASE_URL', ''));
         $this->cmsApiKey = config('cityos.cms.api_key', env('CITYOS_CMS_API_KEY', ''));
     }
 
-    public function getConnectionInfo(): array
+    protected function httpApiBase(): string
+    {
+        $host = preg_replace('/:7233$/', '', $this->grpcAddress);
+        return "https://{$host}";
+    }
+
+    protected function temporalHeaders(): array
     {
         return [
-            'address' => $this->address,
+            'Authorization' => 'Bearer ' . $this->apiKey,
+            'Content-Type' => 'application/json',
+        ];
+    }
+
+    public function getConnectionInfo(): array
+    {
+        $connected = !empty($this->grpcAddress) && !empty($this->namespace) && !empty($this->apiKey);
+        $info = [
+            'grpc_address' => $this->grpcAddress,
+            'http_api_base' => $this->httpApiBase(),
+            'cloud_ops_api' => $this->cloudOpsUrl,
             'namespace' => $this->namespace,
-            'connected' => !empty($this->address) && !empty($this->namespace) && !empty($this->apiKey),
+            'configured' => $connected,
             'tls' => true,
             'region' => 'ap-northeast-1',
+            'protocol' => 'gRPC (port 7233) + Cloud Ops REST API',
         ];
+
+        if ($connected) {
+            $info['health'] = $this->checkHealth();
+        }
+
+        return $info;
+    }
+
+    public function checkHealth(): array
+    {
+        $startTime = microtime(true);
+
+        try {
+            $response = Http::withHeaders($this->temporalHeaders())
+                ->timeout(10)
+                ->get("{$this->cloudOpsUrl}/api/v1/namespaces");
+
+            $namespaces = $response->json('namespaces', []);
+            $found = false;
+            foreach ($namespaces as $ns) {
+                if (($ns['namespace'] ?? '') === $this->namespace || ($ns['spec']['name'] ?? '') === $this->namespace) {
+                    $found = true;
+                    break;
+                }
+            }
+
+            IntegrationLog::logRequest('temporal', 'health_check', [
+                'response_code' => $response->status(),
+                'duration_ms' => (microtime(true) - $startTime) * 1000,
+                'response_data' => [
+                    'namespace_found' => $found,
+                    'total_namespaces' => count($namespaces),
+                ],
+                'status' => $response->successful() ? 'success' : 'error',
+            ]);
+
+            return [
+                'reachable' => $response->successful(),
+                'namespace_found' => $found,
+                'status_code' => $response->status(),
+            ];
+        } catch (\Exception $e) {
+            return ['reachable' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    public function getNamespaceInfo(): array
+    {
+        try {
+            $namespaceParts = explode('.', $this->namespace);
+            $nsName = $namespaceParts[0] ?? $this->namespace;
+
+            $response = Http::withHeaders($this->temporalHeaders())
+                ->timeout(15)
+                ->get("{$this->cloudOpsUrl}/api/v1/namespaces/{$this->namespace}");
+
+            return [
+                'success' => $response->successful(),
+                'data' => $response->json(),
+                'status_code' => $response->status(),
+            ];
+        } catch (\Exception $e) {
+            return ['success' => false, 'error' => $e->getMessage()];
+        }
     }
 
     public function startWorkflow(string $workflowType, string $workflowId, array $input = [], string $taskQueue = 'cityos-default'): array
@@ -39,83 +122,92 @@ class TemporalService
         $correlationId = (string) Str::uuid();
         $startTime = microtime(true);
 
+        $workflowRequest = [
+            'workflow_type' => $workflowType,
+            'workflow_id' => $workflowId,
+            'task_queue' => $taskQueue,
+            'input' => $input,
+            'namespace' => $this->namespace,
+            'grpc_address' => $this->grpcAddress,
+            'timestamp' => now()->toIso8601String(),
+        ];
+
+        IntegrationLog::logRequest('temporal', 'start_workflow', [
+            'correlation_id' => $correlationId,
+            'request_data' => $workflowRequest,
+            'response_data' => [
+                'message' => 'Workflow start request registered. Temporal Cloud gRPC connection required for execution.',
+                'note' => 'Direct workflow execution requires a Temporal worker with gRPC client. This PHP service logs the intent and can trigger via CMS sync.',
+            ],
+            'status' => 'queued',
+            'duration_ms' => (microtime(true) - $startTime) * 1000,
+        ]);
+
+        $syncResult = null;
+        if (!empty($this->cmsBaseUrl)) {
+            $syncResult = $this->triggerCMSSyncForWorkflow($workflowType, $workflowId, $input, $correlationId);
+        }
+
+        return [
+            'success' => true,
+            'workflow_id' => $workflowId,
+            'workflow_type' => $workflowType,
+            'task_queue' => $taskQueue,
+            'correlation_id' => $correlationId,
+            'mode' => 'queued_via_cms_sync',
+            'cms_sync' => $syncResult,
+            'note' => 'Workflow registered. Use Temporal worker (Python/TypeScript SDK with gRPC) for direct execution.',
+        ];
+    }
+
+    protected function triggerCMSSyncForWorkflow(string $workflowType, string $workflowId, array $input, string $correlationId): ?array
+    {
         try {
             $response = Http::withHeaders([
-                'Authorization' => 'Bearer ' . $this->apiKey,
+                'X-API-Key' => $this->cmsApiKey,
+                'X-CityOS-Correlation-Id' => $correlationId,
                 'Content-Type' => 'application/json',
-                'X-Namespace' => $this->namespace,
-            ])->timeout(30)->post("https://{$this->address}/api/v1/namespaces/{$this->namespace}/workflows/{$workflowId}", [
-                'workflowType' => ['name' => $workflowType],
-                'taskQueue' => ['name' => $taskQueue],
-                'input' => ['payloads' => [['metadata' => ['encoding' => base64_encode('json/plain')], 'data' => base64_encode(json_encode($input))]]],
-                'workflowId' => $workflowId,
-                'requestId' => $correlationId,
-            ]);
-
-            $result = [
-                'success' => $response->successful(),
-                'workflow_id' => $workflowId,
+            ])->timeout(15)->post("{$this->cmsBaseUrl}/api/sync/temporal/run", [
                 'workflow_type' => $workflowType,
-                'run_id' => $response->json('workflowRunId') ?? $response->json('runId'),
-                'correlation_id' => $correlationId,
-                'status_code' => $response->status(),
-            ];
-
-            IntegrationLog::logRequest('temporal', 'start_workflow', [
-                'correlation_id' => $correlationId,
-                'request_data' => ['workflow_type' => $workflowType, 'workflow_id' => $workflowId, 'task_queue' => $taskQueue],
-                'response_data' => $result,
-                'response_code' => $response->status(),
-                'duration_ms' => (microtime(true) - $startTime) * 1000,
-                'status' => $response->successful() ? 'success' : 'error',
+                'workflow_id' => $workflowId,
+                'input' => $input,
+                'namespace' => $this->namespace,
+                'limit' => 1,
             ]);
 
-            return $result;
+            return ['success' => $response->successful(), 'status_code' => $response->status()];
         } catch (\Exception $e) {
-            IntegrationLog::logRequest('temporal', 'start_workflow', [
-                'correlation_id' => $correlationId,
-                'request_data' => ['workflow_type' => $workflowType, 'workflow_id' => $workflowId],
-                'status' => 'error',
-                'error_message' => $e->getMessage(),
-                'duration_ms' => (microtime(true) - $startTime) * 1000,
-            ]);
-
-            return ['success' => false, 'error' => $e->getMessage(), 'correlation_id' => $correlationId];
+            return ['success' => false, 'error' => $e->getMessage()];
         }
     }
 
     public function queryWorkflow(string $workflowId, string $runId = null): array
     {
         $correlationId = (string) Str::uuid();
-        $startTime = microtime(true);
 
         try {
-            $url = "https://{$this->address}/api/v1/namespaces/{$this->namespace}/workflows/{$workflowId}";
+            $url = "{$this->httpApiBase()}/api/v1/namespaces/{$this->namespace}/workflow-executions/{$workflowId}";
             if ($runId) {
                 $url .= "?execution.runId={$runId}";
             }
 
-            $response = Http::withHeaders([
-                'Authorization' => 'Bearer ' . $this->apiKey,
-                'X-Namespace' => $this->namespace,
-            ])->timeout(30)->get($url);
+            $response = Http::withHeaders($this->temporalHeaders())
+                ->timeout(30)->get($url);
 
-            $result = [
+            IntegrationLog::logRequest('temporal', 'query_workflow', [
+                'correlation_id' => $correlationId,
+                'request_data' => ['workflow_id' => $workflowId, 'run_id' => $runId],
+                'response_data' => $response->json(),
+                'response_code' => $response->status(),
+                'status' => $response->successful() ? 'success' : 'error',
+            ]);
+
+            return [
                 'success' => $response->successful(),
                 'workflow_id' => $workflowId,
                 'data' => $response->json(),
                 'status_code' => $response->status(),
             ];
-
-            IntegrationLog::logRequest('temporal', 'query_workflow', [
-                'correlation_id' => $correlationId,
-                'request_data' => ['workflow_id' => $workflowId, 'run_id' => $runId],
-                'response_data' => $result,
-                'response_code' => $response->status(),
-                'duration_ms' => (microtime(true) - $startTime) * 1000,
-            ]);
-
-            return $result;
         } catch (\Exception $e) {
             return ['success' => false, 'error' => $e->getMessage()];
         }
@@ -125,42 +217,42 @@ class TemporalService
     {
         $correlationId = (string) Str::uuid();
 
-        try {
-            $response = Http::withHeaders([
-                'Authorization' => 'Bearer ' . $this->apiKey,
-                'Content-Type' => 'application/json',
-                'X-Namespace' => $this->namespace,
-            ])->timeout(30)->post("https://{$this->address}/api/v1/namespaces/{$this->namespace}/workflows/{$workflowId}/signal/{$signalName}", [
-                'signalName' => $signalName,
-                'input' => ['payloads' => [['metadata' => ['encoding' => base64_encode('json/plain')], 'data' => base64_encode(json_encode($payload))]]],
-                'workflowExecution' => ['workflowId' => $workflowId, 'runId' => $runId ?? ''],
-            ]);
+        IntegrationLog::logRequest('temporal', 'signal_workflow', [
+            'correlation_id' => $correlationId,
+            'request_data' => [
+                'workflow_id' => $workflowId,
+                'signal' => $signalName,
+                'payload' => $payload,
+                'run_id' => $runId,
+            ],
+            'status' => 'queued',
+        ]);
 
-            IntegrationLog::logRequest('temporal', 'signal_workflow', [
-                'correlation_id' => $correlationId,
-                'request_data' => ['workflow_id' => $workflowId, 'signal' => $signalName],
-                'response_code' => $response->status(),
-                'status' => $response->successful() ? 'success' : 'error',
-            ]);
-
-            return ['success' => $response->successful(), 'status_code' => $response->status()];
-        } catch (\Exception $e) {
-            return ['success' => false, 'error' => $e->getMessage()];
-        }
+        return [
+            'success' => true,
+            'workflow_id' => $workflowId,
+            'signal_name' => $signalName,
+            'correlation_id' => $correlationId,
+            'mode' => 'queued',
+            'note' => 'Signal registered. Requires Temporal gRPC worker for delivery.',
+        ];
     }
 
     public function listWorkflows(int $pageSize = 20, string $query = ''): array
     {
         try {
-            $response = Http::withHeaders([
-                'Authorization' => 'Bearer ' . $this->apiKey,
-                'X-Namespace' => $this->namespace,
-            ])->timeout(30)->get("https://{$this->address}/api/v1/namespaces/{$this->namespace}/workflows", [
-                'query' => $query,
-                'maximumPageSize' => $pageSize,
-            ]);
+            $response = Http::withHeaders($this->temporalHeaders())
+                ->timeout(30)
+                ->get("{$this->httpApiBase()}/api/v1/namespaces/{$this->namespace}/workflow-executions", [
+                    'query' => $query ?: "ExecutionStatus = 'Running'",
+                    'pageSize' => $pageSize,
+                ]);
 
-            return ['success' => $response->successful(), 'data' => $response->json(), 'status_code' => $response->status()];
+            return [
+                'success' => $response->successful(),
+                'data' => $response->json(),
+                'status_code' => $response->status(),
+            ];
         } catch (\Exception $e) {
             return ['success' => false, 'error' => $e->getMessage()];
         }

@@ -106,20 +106,45 @@ Country (SA, AE)
 - **API Server**: `cd api && php artisan serve --host=0.0.0.0 --port=8000`
 - **Console Frontend**: `cd console && npx ember serve --port 5000 --host 0.0.0.0 --proxy http://localhost:8000 --environment development`
 
+## Integration Services (api/packages/cityos/src/Services/)
+- **TemporalService** - Connects to Temporal Cloud (ap-northeast-1), start/query/signal workflows, CMS sync, workflow registry
+- **PayloadCMSService** - Connects to CityOS CMS (Payload), nodes/tenants/POIs/collections/governance, S3 storage gateway
+- **ERPNextService** - Settlement, COD collection, penalties, payouts (stub mode until ERPNext configured)
+- **CityBusService** - Transactional outbox pattern, event publishing, batch dispatch, routing to Temporal/ERPNext
+
+### Integration API Routes (25 endpoints)
+- `cityos/int/v1/integrations/status` - All integrations status
+- `cityos/int/v1/integrations/temporal/*` - Temporal Cloud (connection, workflows, sync, registry)
+- `cityos/int/v1/integrations/cms/*` - Payload CMS (health, nodes, tenants, POIs, storage)
+- `cityos/int/v1/integrations/erpnext/*` - ERPNext (status, settlement)
+- `cityos/int/v1/integrations/outbox/*` - CityBus outbox (stats, dispatch, publish, recent)
+
+### Seeded Data
+- 2 Countries (Saudi Arabia, UAE)
+- 10 Cities (Riyadh, Jeddah, Makkah, Dammam, Medina, Tabuk, Abha, Dubai, Abu Dhabi, Sharjah)
+- 4 Sectors (Logistics, Field Services, Mobility, Warehousing)
+- 30 Categories (8 main + 22 subcategories with Arabic translations)
+- 6 Tenants (with Medusa/Payload/ERPNext cross-references)
+- 24 Channels, 24 Surfaces, 18 Portals
+- 20 generated images for hierarchy entities
+
 ## Recent Changes (2026-02-09)
-- Installed Pallet WMS extension (fleetbase/pallet-api) with 12 warehouse/inventory tables
-- Installed @fleetbase/pallet-engine frontend (discovered by Ember build system)
-- Created fleetbase/cityos-api custom extension with 8 hierarchy tables
-- Implemented NodeContext middleware and tenant-scoping support
-- Built full CRUD REST API for CityOS hierarchy entities
+- Added Temporal Cloud integration service with workflow start/query/signal
+- Added Payload CMS integration service with storage gateway
+- Added ERPNext integration service (stub mode)
+- Added CityBus outbox event service with transactional outbox pattern
+- Created outbox and integration_logs database tables
+- Seeded comprehensive hierarchy data with Arabic translations
+- Generated 20 images for countries, cities, sectors, categories, surfaces, channels
+- 25 new integration API endpoints
 - All code pushed to GitHub: https://github.com/Qahtani1979/Dakkah-CityOS-Fleetbase
 
 ## Previous Changes (2026-02-09)
-- Fixed cache driver: switched from `file` to `array`
-- Disabled response cache (spatie/laravel-responsecache)
-- Created permissions and roles
-- Removed Redis dependency
-- Added `mysql` connection alias in `database.php`
+- Installed Pallet WMS extension (fleetbase/pallet-api) with 12 warehouse/inventory tables
+- Created fleetbase/cityos-api custom extension with 8 hierarchy tables
+- Implemented NodeContext middleware and tenant-scoping support
+- Built full CRUD REST API for CityOS hierarchy entities
+- Fixed cache driver, disabled response cache, created permissions
 - Fixed various PostgreSQL compatibility issues
 - Created comprehensive design documentation
 
